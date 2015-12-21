@@ -12,6 +12,7 @@
 #include <valhalla/baldr/pathlocation.h>
 #include <valhalla/sif/dynamiccost.h>
 #include <valhalla/sif/edgelabel.h>
+#include <valhalla/sif/costfactory.h>
 #include <valhalla/thor/adjacencylist.h>
 #include <valhalla/thor/edgestatus.h>
 #include <valhalla/thor/pathalgorithm.h>
@@ -81,6 +82,7 @@ class TimeDistanceMatrix : public PathAlgorithm {
    */
   TimeDistanceMatrix(float initial_cost_threshold = kDefaultCostThreshold);
 
+  TimeDistanceMatrix(float initial_cost_threshold, const std::string &json);
   /**
    * One to many time and distance cost matrix. Computes time and distance
    * matrix from one origin location to many other locations.
@@ -96,6 +98,8 @@ class TimeDistanceMatrix : public PathAlgorithm {
           baldr::GraphReader& graphreader,
           const std::shared_ptr<sif::DynamicCost>* mode_costing,
           const sif::TravelMode mode);
+
+  std::vector<TimeDistance> OneToMany(const std::vector<midgard::Point2>& geopoints);
 
   /**
    * Many to one time and distance cost matrix. Computes time and distance
@@ -221,6 +225,14 @@ class TimeDistanceMatrix : public PathAlgorithm {
    * @return  Returns a time distance matrix among locations.
    */
   std::vector<TimeDistance> FormTimeDistanceMatrix();
+
+  static boost::property_tree::ptree init_graphreader_ptree(const std::string& json);
+
+  sif::CostFactory<sif::DynamicCost> factory_;
+  sif::TravelMode mode_;
+  std::shared_ptr<sif::DynamicCost> mode_costing_[4];
+  std::shared_ptr<sif::DynamicCost> cost_;
+  baldr::GraphReader graphreader_;
 };
 
 }

@@ -1,7 +1,18 @@
 #include <vector>
 #include <algorithm>
+//#include <string>
 #include "thor/timedistancematrix.h"
 #include <valhalla/midgard/logging.h>
+#include <valhalla/sif/costfactory.h>
+#include <valhalla/loki/search.h>
+#include <valhalla/baldr/graphreader.h>
+#include <iostream>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/format.hpp>
+#include <android/log.h>
+#define LOGD(LOG_TAG, ...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOG_TAG "TDM"
 
 using namespace valhalla::baldr;
 using namespace valhalla::sif;
@@ -14,6 +25,43 @@ TimeDistanceMatrix::TimeDistanceMatrix(float initial_cost_threshold)
     : settled_count_(0),
       initial_cost_threshold_(initial_cost_threshold),
       cost_threshold_(initial_cost_threshold) {
+}
+
+// this constructor is based on the fixture setup in timedistance_test.cc
+TimeDistanceMatrix::TimeDistanceMatrix(float initial_cost_threshold,
+                                       const std::string& json)
+    : graphreader_(init_graphreader_ptree(json)),
+      settled_count_(0),
+      initial_cost_threshold_(initial_cost_threshold),
+      cost_threshold_(initial_cost_threshold)
+       {
+//  LOGD(LOG_TAG, "constructor input json: %s", json.c_str());
+
+//  LOGD(LOG_TAG, "std::stringstream stream;");
+  std::stringstream stream;
+//  LOGD(LOG_TAG, "stream << json;");
+  stream << json;
+//  LOGD(LOG_TAG, "boost::property_tree::ptree pt;");
+  boost::property_tree::ptree pt;
+//  LOGD(LOG_TAG, "boost::property_tree::read_json(stream, pt);");
+  boost::property_tree::read_json(stream, pt);
+
+//  LOGD(LOG_TAG, "factory_.Register(\"pedestrian\", CreatePedestrianCost);");
+  factory_.Register("pedestrian", CreatePedestrianCost);
+//  LOGD(LOG_TAG, "cost_ = factory_.Create(\"pedestrian\", pt.get_child(\"costing_options.pedestrian\"));");
+  cost_ = factory_.Create("pedestrian", pt.get_child("costing_options.pedestrian"));
+//  LOGD(LOG_TAG, "mode_ = cost_->travelmode();");
+  mode_ = cost_->travelmode();
+//  LOGD(LOG_TAG, "mode_costing_[static_cast<uint32_t>(mode_)] = cost_;");
+  mode_costing_[static_cast<uint32_t>(mode_)] = cost_;
+}
+
+boost::property_tree::ptree TimeDistanceMatrix::init_graphreader_ptree(const std::string& json) {
+  std::stringstream stream;
+  stream << json;
+  boost::property_tree::ptree pt;
+  boost::property_tree::read_json(stream, pt);
+  return pt.get_child("mjolnir.hierarchy");
 }
 
 // Clear the temporary information generated during time + distance matrix
@@ -165,6 +213,17 @@ std::vector<TimeDistance> TimeDistanceMatrix::OneToMany(
     }
   }
   return {};      // Should never get here
+}
+
+std::vector<TimeDistance> TimeDistanceMatrix::OneToMany(
+    const std::vector<midgard::Point2>& geopoints) {
+  std::vector<PathLocation> path_locations;
+
+  for (auto& gp : geopoints) {
+    path_locations.push_back(loki::Search(Location(midgard::PointLL(gp)), graphreader_, cost_->GetFilter()));
+  }
+
+  return TimeDistanceMatrix::OneToMany(static_cast<uint32_t>(0), path_locations, graphreader_, mode_costing_, mode_);
 }
 
 // Many to one time and distance cost matrix. Computes time and distance
