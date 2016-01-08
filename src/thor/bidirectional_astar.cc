@@ -145,7 +145,7 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
       GraphId oppedge = pred.opp_edgeid();
       if (oppedge.Is_Valid()) {
         EdgeStatusInfo oppedgestatus = edgestatus_reverse_->Get(oppedge);
-        if (oppedgestatus.set() == EdgeSet::kPermanent &&
+        if (oppedgestatus.set() != EdgeSet::kUnreached &&
             ((best_connection_.edgeid == pred.edgeid() &&
               best_connection_.opp_edgeid == oppedge) ||
              (best_connection_.edgeid == oppedge &&
@@ -187,6 +187,10 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
       const DirectedEdge* directededge = tile->directededge(nodeinfo->edge_index());
       for (uint32_t i = 0, n = nodeinfo->edge_count(); i < n;
                   i++, directededge++, edgeid++) {
+        // TEST - do not allow downard transitions
+        if (directededge->trans_down())
+          continue;
+
         // Handle transition edges they either get skipped or added to the
         // adjacency list using the predecessor info
         if (directededge->trans_up() || directededge->trans_down()) {
@@ -247,7 +251,7 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
         // Check if the opposing edge is in the reverse adjacency list. If so
         // it is a candidate connection - is it least cost?
         EdgeStatusInfo oppedgestatus = edgestatus_reverse_->Get(oppedge);
-        if (oppedgestatus.set() == EdgeSet::kTemporary) {
+        if (oppedgestatus.set() != EdgeSet::kUnreached) {
           float c = pred.cost().cost +
               edgelabels_reverse_[oppedgestatus.status.index].cost().cost;
           if (c < best_connection_.cost) {
@@ -270,7 +274,7 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
       GraphId oppedge = pred2.opp_edgeid();
       if (oppedge.Is_Valid()) {
         EdgeStatusInfo oppedgestatus = edgestatus_->Get(oppedge);
-        if (oppedgestatus.set() == EdgeSet::kPermanent &&
+        if (oppedgestatus.set() != EdgeSet::kUnreached &&
             ((best_connection_.edgeid == pred2.edgeid() &&
               best_connection_.opp_edgeid == oppedge) ||
              (best_connection_.edgeid == oppedge &&
@@ -316,6 +320,10 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
       const DirectedEdge* directededge = tile2->directededge(nodeinfo->edge_index());
       for (uint32_t i = 0; i < nodeinfo->edge_count();
               i++, directededge++, edgeid++) {
+        // TEST - do not allow downard transitions
+        if (directededge->trans_down())
+          continue;
+
         // Handle transition edges they either get skipped or added to the
         // adjacency list using the predecessor info
         if (directededge->trans_up() || directededge->trans_down()) {
@@ -355,17 +363,20 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
         // Update the_shortcuts mask
         shortcuts |= directededge->shortcut();
 
-        // Get cost. Use opposing edge for EdgeCost.
+        // Get cost. Use opposing edge for EdgeCost. Split the elapsed time
+        // into the accumulated edge cost and the turn cost
         Cost newcost = pred2.cost() +
-              costing->EdgeCost(opp_edge, nodeinfo->density()) +
-              costing->TransitionCostReverse(directededge->localedgeidx(),
-                                             nodeinfo, opp_edge, opp_pred_edge);
+              costing->EdgeCost(opp_edge, nodeinfo->density());
+        Cost tc = costing->TransitionCostReverse(directededge->localedgeidx(),
+                           nodeinfo, opp_edge, opp_pred_edge);
+        newcost.cost += tc.cost;
 
         // Check if edge is temporarily labeled and this path has less cost. If
         // less cost the predecessor is updated and the sort cost is decremented
         // by the difference in real cost (A* heuristic doesn't change)
         if (edgestatus.set() == EdgeSet::kTemporary) {
-          CheckIfLowerCostPathReverse(edgestatus.status.index, predindex2, newcost);
+          CheckIfLowerCostPathReverse(edgestatus.status.index, predindex2,
+                                      newcost, tc);
           continue;
         }
 
@@ -376,15 +387,17 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
 
         // Add edge label, add to the adjacency list and set edge status
         AddToAdjacencyListReverse(edgeid, sortcost);
-        edgelabels_reverse_.emplace_back(predindex2, edgeid, oppedge,
+        EdgeLabel edge_label(predindex2, edgeid, oppedge,
                      directededge, newcost, sortcost, dist,
                      directededge->restrictions(),
                      directededge->opp_local_idx(), mode_);
+        edge_label.set_turn_cost(tc.secs);
+        edgelabels_reverse_.push_back(std::move(edge_label));
 
         // Check if the opposing edge is in the reverse adjacency list. If so
-        //  check if it is least cost candidate.
+        // check if it is least cost candidate.
         EdgeStatusInfo oppedgestatus = edgestatus_->Get(oppedge);
-        if (oppedgestatus.set() == EdgeSet::kTemporary) {
+        if (oppedgestatus.set() != EdgeSet::kUnreached) {
           float c = pred.cost().cost +
               edgelabels_[oppedgestatus.status.index].cost().cost;
           if (c < best_connection_.cost) {
@@ -414,7 +427,7 @@ void BidirectionalAStar::HandleTransitionEdgeReverse(const uint32_t level,
   // Allow the transition edge. Add it to the adjacency list and edge labels
   // using the predecessor information. Transition edges have no length.
   AddToAdjacencyListReverse(edgeid, pred.sortcost());
-  edgelabels_reverse_.emplace_back(predindex, edgeid,
+  edgelabels_reverse_.emplace_back(predindex, edgeid, pred.opp_edgeid(),
                 edge, pred.cost(), pred.sortcost(), dist,
                 pred.restrictions(), pred.opp_local_idx(), mode_);
 }
@@ -452,12 +465,14 @@ void BidirectionalAStar::AddToAdjacencyListReverse(const GraphId& edgeid,
 // done for the reverse search.
 void BidirectionalAStar::CheckIfLowerCostPathReverse(const uint32_t idx,
                                          const uint32_t predindex,
-                                         const Cost& newcost) {
+                                         const Cost& newcost,
+                                         const Cost& tc) {
   float dc = edgelabels_reverse_[idx].cost().cost - newcost.cost;
   if (dc > 0) {
     float oldsortcost = edgelabels_reverse_[idx].sortcost();
     float newsortcost = oldsortcost - dc;
     edgelabels_reverse_[idx].Update(predindex, newcost, newsortcost);
+    edgelabels_reverse_[idx].set_turn_cost(tc.secs);
     adjacencylist_reverse_->DecreaseCost(idx, newsortcost, oldsortcost);
   }
 }
@@ -575,7 +590,7 @@ std::vector<PathInfo> BidirectionalAStar::FormPath(const uint32_t idx1,
   }
 
   // Reverse the list
-  std:reverse(path.begin(), path.end());
+  std::reverse(path.begin(), path.end());
 
   // Get the elapsed time at the end of the forward path. NOTE: PathInfo
   // stores elapsed time as uint32_t but EdgeLabels uses float. Need to
@@ -583,23 +598,48 @@ std::vector<PathInfo> BidirectionalAStar::FormPath(const uint32_t idx1,
   // error.
   float secs = path.back().elapsed_time;
 
+  // Get the turn cost at the last edge of the reverse path
+  float tc = edgelabels_reverse_[idx2].turn_cost();
+
+  // Special case - predecessor is invalid (means the path meets at the
+  // destination edge. This can occur if both the origin and the destination
+  // are in a not-thru region
+  uint32_t edgelabel_index = edgelabels_reverse_[idx2].predecessor();
+  if (edgelabel_index == kInvalidLabel) {
+    // Update the elapsed time (replace the time on the last edge). This
+    // will miss the turn cost onto the last edge, but this case is rare!
+    uint32_t secs = static_cast<uint32_t>(edgelabels_reverse_[idx2].cost().secs);
+    if (path.size() == 1) {
+      path.back().elapsed_time = secs;
+    } else {
+      // Get elapsed time of the last edge
+      size_t n = path.size() - 1;
+      path.back().elapsed_time = path[path.size()-2].elapsed_time + secs;
+      return path;
+    }
+  }
+
   // Append the reverse path from the destination - use opposing edges
   // The first edge on the reverse path is the same as the last on the forward
   // path, so get the predecessor.
-  uint32_t edgelabel_index = edgelabels_reverse_[idx2].predecessor();
   while (edgelabel_index != kInvalidLabel) {
     const EdgeLabel& edgelabel = edgelabels_reverse_[edgelabel_index];
     GraphId oppedge = graphreader.GetOpposingEdgeId(edgelabel.edgeid());
 
-    // Get elapsed time on the edge
+    // Add the elapsed time on the edge and the prior turn cost
     uint32_t pred = edgelabels_reverse_[edgelabel_index].predecessor();
     if (pred == kInvalidLabel) {
       secs += edgelabel.cost().secs;
     } else {
       secs += edgelabel.cost().secs - edgelabels_reverse_[pred].cost().secs;
     }
+
+    secs += tc;
     path.emplace_back(edgelabel.mode(), static_cast<uint32_t>(secs),
-                            oppedge,  edgelabel.tripid());
+                      oppedge,  edgelabel.tripid());
+
+    // Get the turn cost (apply it to next edge)
+    tc = edgelabel.turn_cost();
 
     // Update edgelabel_index
     edgelabel_index = pred;
