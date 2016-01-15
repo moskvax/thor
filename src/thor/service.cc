@@ -161,7 +161,8 @@ namespace {
    public:
     thor_worker_t(const boost::property_tree::ptree& config): mode(valhalla::sif::TravelMode::kPedestrian),
       config(config), reader(config.get_child("mjolnir.hierarchy")),
-      long_request(config.get<float>("thor.logging.long_request")){
+      long_request(config.get<float>("thor.logging.long_request")),
+      loki_long_request(config.get<float>("loki.logging.long_request")){
       // Register edge/node costing methods
       factory.Register("auto", sif::CreateAutoCost);
       factory.Register("auto_shorter", sif::CreateAutoShorterCost);
@@ -522,10 +523,12 @@ namespace {
          break;
       }
 
-      //get processing time for locate
+      //get processing time for matrix
       auto time = std::chrono::high_resolution_clock::now();
       auto msecs = std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count();
-      auto elapsed_time = static_cast<float>(msecs - request.get<size_t>("start_time"));
+      //need to subtract off the time it takes to search, especially for small routes
+      auto search_time = locations.size() - loki_long_request;
+      auto elapsed_time = static_cast<float>((msecs - request.get<size_t>("start_time")) - search_time);
 
       //log request if greater then X (ms)
       if ((elapsed_time / correlated.size()) > long_request) {
@@ -666,6 +669,7 @@ namespace {
     thor::BidirectionalAStar bidir_astar;
     thor::MultiModalPathAlgorithm multi_modal_astar;
     float long_request;
+    float loki_long_request;
   };
 }
 
